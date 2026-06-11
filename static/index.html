@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="vi" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Công cụ lấy ID Facebook miễn phí — Check UID profile, page, group trong 1 giây. Không cần đăng nhập." />
+  <title>GetID Facebook — Lấy UID Facebook miễn phí | DichVuRight</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+          colors: {
+            border: 'hsl(var(--border))',
+            input: 'hsl(var(--input))',
+            ring: 'hsl(var(--ring))',
+            background: 'hsl(var(--background))',
+            foreground: 'hsl(var(--foreground))',
+            primary: { DEFAULT: 'hsl(var(--primary))', foreground: 'hsl(var(--primary-foreground))' },
+            secondary: { DEFAULT: 'hsl(var(--secondary))', foreground: 'hsl(var(--secondary-foreground))' },
+            muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
+            accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
+            card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+            destructive: { DEFAULT: 'hsl(var(--destructive))', foreground: 'hsl(var(--destructive-foreground))' },
+          },
+          borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' },
+          keyframes: {
+            'fade-in': { from: { opacity: '0', transform: 'translateY(8px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+            'pulse-dot': { '0%,100%': { opacity: '1' }, '50%': { opacity: '.4' } },
+          },
+          animation: { 'fade-in': 'fade-in .4s ease-out', 'pulse-dot': 'pulse-dot 2s ease-in-out infinite' },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --background: 0 0% 100%;
+      --foreground: 240 10% 3.9%;
+      --card: 0 0% 100%;
+      --card-foreground: 240 10% 3.9%;
+      --primary: 221.2 83.2% 53.3%;
+      --primary-foreground: 210 40% 98%;
+      --secondary: 240 4.8% 95.9%;
+      --secondary-foreground: 240 5.9% 10%;
+      --muted: 240 4.8% 95.9%;
+      --muted-foreground: 240 3.8% 46.1%;
+      --accent: 240 4.8% 95.9%;
+      --accent-foreground: 240 5.9% 10%;
+      --destructive: 0 84.2% 60.2%;
+      --destructive-foreground: 0 0% 98%;
+      --border: 240 5.9% 90%;
+      --input: 240 5.9% 90%;
+      --ring: 221.2 83.2% 53.3%;
+      --radius: 0.75rem;
+    }
+    .dark {
+      --background: 240 10% 3.9%;
+      --foreground: 0 0% 98%;
+      --card: 240 10% 6%;
+      --card-foreground: 0 0% 98%;
+      --primary: 217.2 91.2% 59.8%;
+      --primary-foreground: 222.2 47.4% 11.2%;
+      --secondary: 240 3.7% 15.9%;
+      --secondary-foreground: 0 0% 98%;
+      --muted: 240 3.7% 15.9%;
+      --muted-foreground: 240 5% 64.9%;
+      --accent: 240 3.7% 15.9%;
+      --accent-foreground: 0 0% 98%;
+      --destructive: 0 62.8% 50.6%;
+      --destructive-foreground: 0 0% 98%;
+      --border: 240 3.7% 15.9%;
+      --input: 240 3.7% 15.9%;
+      --ring: 224.3 76.3% 48%;
+    }
+    .gradient-text {
+      background: linear-gradient(135deg, hsl(var(--primary)) 0%, #7c3aed 50%, #ec4899 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero-glow {
+      background: radial-gradient(ellipse 80% 50% at 50% -20%, hsl(var(--primary) / 0.15), transparent);
+    }
+    .faq-a { max-height: 0; overflow: hidden; transition: max-height .3s ease, padding .3s ease; }
+    .faq-item.open .faq-a { max-height: 200px; padding-top: 0.75rem; }
+    .faq-item.open .faq-icon { transform: rotate(45deg); }
+  </style>
+</head>
+<body class="min-h-full bg-background text-foreground font-sans antialiased">
+  <div id="app" class="relative">
+    <div class="hero-glow pointer-events-none fixed inset-x-0 top-0 h-[480px] z-0" aria-hidden="true"></div>
+
+    <!-- Navbar -->
+    <nav class="sticky top-0 z-50 border-b border-border/60 bg-background/80 backdrop-blur-md">
+      <div class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
+        <a href="/" class="flex items-center gap-2.5 rounded-lg outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring" aria-label="Trang chủ Get ID Facebook">
+          <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true"><i data-lucide="scan-search" class="icon-lg"></i></span>
+          <span class="text-lg font-bold tracking-tight">Get<span class="text-primary">ID</span> Facebook</span>
+        </a>
+        <ul class="hidden items-center gap-6 text-sm font-medium text-muted-foreground md:flex" aria-label="Menu chính">
+          <li><a class="transition-colors hover:text-foreground" href="#faq">FAQ</a></li>
+        </ul>
+        <div class="flex items-center gap-2">
+          <button type="button" id="theme-toggle" class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-input bg-background text-sm shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground" aria-label="Đổi giao diện sáng/tối">
+            <i data-lucide="moon" class="icon dark:hidden"></i>
+            <i data-lucide="sun" class="icon hidden dark:inline-block"></i>
+          </button>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <header class="relative z-10 border-b border-border/40 pb-12 pt-10 sm:pb-16 sm:pt-14">
+      <div class="mx-auto max-w-6xl px-4 text-center sm:px-6">
+        <div class="mb-6 inline-flex flex-wrap items-center justify-center gap-2 rounded-full border border-border bg-card px-4 py-1.5 text-xs font-medium text-muted-foreground shadow-sm">
+          <span class="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400"><span class="h-1.5 w-1.5 animate-pulse-dot rounded-full bg-emerald-500"></span> Miễn phí</span>
+          <span class="text-border">·</span>
+          <span>Không cần đăng nhập</span>
+          <span class="text-border">·</span>
+          <span>Free Forever</span>
+        </div>
+        <h1 class="text-3xl font-extrabold tracking-tight sm:text-4xl md:text-5xl lg:text-[3.25rem] lg:leading-[1.15]">
+          Công cụ Lấy ID Facebook —<br />
+          <span class="gradient-text">Check ID, Find UID</span> trong 1 giây
+        </h1>
+        <p class="mx-auto mt-5 max-w-2xl text-base text-muted-foreground sm:text-lg">
+          Dán link Facebook, nhận ngay UID của <strong class="font-semibold text-foreground">trang cá nhân, group, fanpage, bài viết, video hoặc ảnh</strong> — nhanh, chính xác và hoàn toàn miễn phí.
+        </p>
+      </div>
+    </header>
+
+    <!-- Tool -->
+    <section class="relative z-10 py-10 sm:py-14">
+      <div class="mx-auto max-w-3xl px-4 sm:px-6">
+        <article class="animate-fade-in rounded-xl border border-border bg-card p-6 shadow-lg sm:p-8" aria-labelledby="tool-title">
+          <div id="tool-title" class="mb-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">Nhập link cần lấy ID</div>
+          <form id="extract-form" novalidate>
+            <div class="flex flex-col gap-3 sm:flex-row">
+              <div class="relative flex-1">
+                <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                </span>
+                <input type="url" id="link" name="link" class="flex h-11 w-full rounded-md border border-input bg-background pl-10 pr-3 text-sm shadow-sm ring-offset-background transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="https://www.facebook.com/..." autocomplete="off" spellcheck="false" required />
+              </div>
+              <button type="submit" id="btn-submit" class="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50">
+                <span id="btn-label">Lấy ID ngay</span>
+                <i data-lucide="arrow-right" class="icon" aria-hidden="true"></i>
+              </button>
+            </div>
+          </form>
+          <p id="helper-error" class="mt-3 hidden text-sm text-destructive" role="alert"></p>
+
+          <!-- Result -->
+          <div id="result-panel" class="mt-6 hidden rounded-lg border border-border bg-muted/40 p-4 sm:p-5 animate-fade-in">
+            <div class="mb-3 flex items-center justify-between gap-2">
+              <span class="text-xs font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">Kết quả</span>
+              <span id="result-time" class="text-xs text-muted-foreground"></span>
+            </div>
+            <dl class="grid gap-3 text-sm sm:grid-cols-2">
+              <div class="rounded-md border border-border bg-card p-3">
+                <dt class="text-xs text-muted-foreground">UID / ID</dt>
+                <dd class="mt-1 flex items-center gap-2">
+                  <code id="result-id" class="flex-1 break-all font-mono text-base font-semibold text-primary"></code>
+                  <button type="button" id="btn-copy" class="inline-flex h-8 shrink-0 items-center rounded-md border border-input bg-background px-2.5 text-xs font-medium hover:bg-accent">Copy</button>
+                </dd>
+              </div>
+              <div class="rounded-md border border-border bg-card p-3">
+                <dt class="text-xs text-muted-foreground">Tên hiển thị</dt>
+                <dd id="result-name" class="mt-1 font-medium"></dd>
+              </div>
+              <div class="rounded-md border border-border bg-card p-3 sm:col-span-2">
+                <dt class="text-xs text-muted-foreground">Username</dt>
+                <dd id="result-username" class="mt-1 font-mono text-sm"></dd>
+              </div>
+              <div class="rounded-md border border-border bg-card p-3 sm:col-span-2">
+                <dt class="text-xs text-muted-foreground">URL</dt>
+                <dd><a id="result-url" href="#" target="_blank" rel="noopener" class="text-sm text-primary hover:underline break-all"></a></dd>
+              </div>
+            </dl>
+          </div>
+        </article>
+        <p class="mt-4 text-center text-xs text-muted-foreground">API by <strong>DichVuRight</strong> · Hỗ trợ <code class="rounded bg-muted px-1 py-0.5">?url=</code> hoặc username trong link</p>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section id="faq" class="border-t border-border/60 bg-muted/20 py-14 sm:py-20">
+      <div class="mx-auto max-w-3xl px-4 sm:px-6">
+        <h2 class="mb-8 text-center text-2xl font-bold tracking-tight sm:text-3xl">Câu hỏi thường gặp</h2>
+        <div class="space-y-2" id="faq-wrap">
+          <div class="faq-item open rounded-lg border border-border bg-card px-4 shadow-sm">
+            <button type="button" class="faq-q flex w-full items-center justify-between py-4 text-left font-medium">
+              <span>Lấy ID Facebook có miễn phí không?</span>
+              <span class="faq-icon text-muted-foreground transition-transform"><i data-lucide="plus" class="icon"></i></span>
+            </button>
+            <div class="faq-a pb-4 text-sm text-muted-foreground">Hoàn toàn miễn phí và không giới hạn số lần sử dụng. Bạn không cần đăng ký hay đăng nhập tài khoản.</div>
+          </div>
+          <div class="faq-item rounded-lg border border-border bg-card px-4 shadow-sm">
+            <button type="button" class="faq-q flex w-full items-center justify-between py-4 text-left font-medium">
+              <span>Công cụ hỗ trợ lấy những loại ID nào?</span>
+              <span class="faq-icon text-muted-foreground transition-transform"><i data-lucide="plus" class="icon"></i></span>
+            </button>
+            <div class="faq-a pb-0 text-sm text-muted-foreground">Hỗ trợ UID trang cá nhân, ID group, fanpage, ID bài viết, video, ảnh và nhiều loại link Facebook khác.</div>
+          </div>
+          <div class="faq-item rounded-lg border border-border bg-card px-4 shadow-sm">
+            <button type="button" class="faq-q flex w-full items-center justify-between py-4 text-left font-medium">
+              <span>Link của tôi có bị lưu lại không?</span>
+              <span class="faq-icon text-muted-foreground transition-transform"><i data-lucide="plus" class="icon"></i></span>
+            </button>
+            <div class="faq-a pb-0 text-sm text-muted-foreground">Không. Hệ thống chỉ xử lý request và trả kết quả, không ghi log link người dùng nhập vào.</div>
+          </div>
+          <div class="faq-item rounded-lg border border-border bg-card px-4 shadow-sm">
+            <button type="button" class="faq-q flex w-full items-center justify-between py-4 text-left font-medium">
+              <span>Tại sao tôi nhận được thông báo lỗi?</span>
+              <span class="faq-icon text-muted-foreground transition-transform"><i data-lucide="plus" class="icon"></i></span>
+            </button>
+            <div class="faq-a pb-0 text-sm text-muted-foreground">Hãy kiểm tra lại link đã đúng định dạng Facebook chưa, hoặc thử với một link công khai khác. Một số profile/group ở chế độ riêng tư có thể không lấy được ID.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="border-t border-border py-8 text-center text-sm text-muted-foreground">
+      <p>© GetID Facebook · Powered by <strong class="text-foreground">DichVuRight</strong></p>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      const html = document.documentElement;
+      const stored = localStorage.getItem('theme');
+      if (stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        html.classList.add('dark');
+      }
+      document.getElementById('theme-toggle').addEventListener('click', () => {
+        html.classList.toggle('dark');
+        localStorage.setItem('theme', html.classList.contains('dark') ? 'dark' : 'light');
+        if (window.lucide) lucide.createIcons();
+      });
+
+      document.querySelectorAll('.faq-item .faq-q').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const item = btn.closest('.faq-item');
+          const open = item.classList.contains('open');
+          document.querySelectorAll('.faq-item').forEach((i) => i.classList.remove('open'));
+          if (!open) item.classList.add('open');
+        });
+      });
+
+      const form = document.getElementById('extract-form');
+      const input = document.getElementById('link');
+      const helper = document.getElementById('helper-error');
+      const panel = document.getElementById('result-panel');
+      const btnSubmit = document.getElementById('btn-submit');
+      const btnLabel = document.getElementById('btn-label');
+
+      function showError(msg) {
+        document.getElementById('helper-error-text').textContent = msg;
+        helper.classList.remove('hidden');
+
+        input.classList.add('border-destructive', 'ring-destructive/20');
+        panel.classList.add('hidden');
+      }
+      function clearError() {
+        helper.classList.add('hidden');
+        input.classList.remove('border-destructive', 'ring-destructive/20');
+      }
+
+      function buildApiUrl(raw) {
+        const v = raw.trim();
+        const params = new URLSearchParams();
+        if (/facebook\.com|fb\.com|fb\.me/i.test(v) || v.startsWith('http')) {
+          params.set('url', v.startsWith('http') ? v : 'https://' + v);
+        } else {
+          params.set('username', v.replace(/^@/, ''));
+        }
+        return '/api/v1/facebook?' + params.toString();
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const val = input.value.trim();
+        if (!val) {
+          showError('Vui lòng nhập link Facebook');
+          return;
+        }
+        btnSubmit.disabled = true;
+        btnLabel.textContent = 'Đang lấy ID...';
+        try {
+          const res = await fetch(buildApiUrl(val), { headers: { Accept: 'application/json' } });
+          const data = await res.json();
+          if (data.status !== 'success' || !data.id) {
+            showError(data.message || 'Không lấy được UID. Thử link khác.');
+            return;
+          }
+          document.getElementById('result-id').textContent = data.id;
+          document.getElementById('result-name').textContent = data.name || '—';
+          document.getElementById('result-username').textContent = data.username || '—';
+          const urlEl = document.getElementById('result-url');
+          urlEl.textContent = data.url || '';
+          urlEl.href = data.url || '#';
+          const t = data.time_elapsed != null ? data.time_elapsed.toFixed(2) + 's' : '';
+          const tc = data.time_check ? ' · ' + data.time_check : '';
+          document.getElementById('result-time').textContent = t + tc;
+          panel.classList.remove('hidden');
+        } catch (err) {
+          const base = window.__FB_GETID_API__ || location.origin;
+          showError('Lỗi kết nối API. Mở trang đúng cổng server (vd ' + base + '), không phải :8080 proxy. Chạy tool_facebook.exe và xem LISTEN trong .env.');
+        } finally {
+          btnSubmit.disabled = false;
+          btnLabel.textContent = 'Lấy ID ngay';
+        }
+      });
+
+      document.getElementById('btn-copy').addEventListener('click', async () => {
+        const id = document.getElementById('result-id').textContent;
+        try {
+          await navigator.clipboard.writeText(id);
+          const label = document.getElementById('btn-copy-text');
+          const old = label.textContent;
+          label.textContent = 'Đã copy!';
+          setTimeout(() => { label.textContent = old; }, 1500);
+        } catch (_) {}
+      });
+    })();
+  </script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.lucide) lucide.createIcons();
+    });
+  </script>
+</body>
+</html>
