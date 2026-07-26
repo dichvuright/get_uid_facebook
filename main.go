@@ -375,14 +375,19 @@ func initFBDirectTransport(timeoutSec int) {
 	})
 }
 
-// setHeaders xoay vòng theo index, mỗi request 1 bộ header Chrome khác nhau
-func setHeaders(req *http.Request, cookie string) {
+// setHeaders xoay vòng theo index, mỗi request 1 bộ header Chrome khác nhau.
+// referer="" nghĩa là đi thẳng (gõ URL) -> sec-fetch-site=none.
+// Truyền referer khi đi từ link nội bộ -> sec-fetch-site=same-origin.
+func setHeaders(req *http.Request, cookie, referer string) {
 	idx := atomic.AddInt64(&headerIdx, 1) - 1
 	p := headerProfiles[int(idx)%len(headerProfiles)]
 
 	h := req.Header
 	h.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	h.Set("accept-language", p.acceptLanguage)
+	// Không set Accept-Encoding: để Go tự thêm "gzip" (nếu DisableCompression=false)
+	// và tự giải nén response. Nếu set thủ công "gzip, deflate" Facebook vẫn trả về
+	// gzip nhưng một số trường hợp Go không decode -> nhận binary rác.
 	h.Set("cache-control", "max-age=0")
 	h.Set("cookie", cookie)
 	h.Set("dpr", "1")
@@ -396,13 +401,24 @@ func setHeaders(req *http.Request, cookie string) {
 	h.Set("sec-ch-ua-platform-version", p.platformVersion)
 	h.Set("sec-fetch-dest", "document")
 	h.Set("sec-fetch-mode", "navigate")
-	h.Set("sec-fetch-site", "same-origin")
+	if referer == "" {
+		// Truy cập trực tiếp (gõ URL thanh address bar)
+		h.Set("sec-fetch-site", "none")
+	} else {
+		h.Set("sec-fetch-site", "same-origin")
+		h.Set("referer", referer)
+	}
 	h.Set("sec-fetch-user", "?1")
 	h.Set("sec-gpc", p.secGPC)
 	h.Set("upgrade-insecure-requests", "1")
 	h.Set("user-agent", p.ua)
 	h.Set("viewport-width", p.viewportWidth)
-	// Header thực tế Chrome luôn gửi thêm
+	// Header Chrome trên desktop thường gửi kèm
+	h.Set("device-memory", "8")
+	h.Set("downlink", "10")
+	h.Set("ect", "4g")
+	h.Set("rtt", "50")
+	// Connection: keep-alive
 	h.Set("Connection", "keep-alive")
 }
 
@@ -422,6 +438,14 @@ func runServer(listen, cookie string, pool *ProxyPool, proxyFallbackDirect bool,
 			"proxy_host":      getEnv("PROXY_HOST", defaultProxyHost),
 			"fallback_direct": proxyFallbackDirect,
 		})
+	})
+	// Debug: gọi thẳng tới Facebook qua 3 host (www / mbasic / m) và trả về
+	// status, final_url, độ dài html, cờ is_login, preview 600 ký tự đầu.
+	// Dùng để xem tại sao 1 profile bị dính login / không tìm thấy UID.
+	//
+	// VD: curl 'http://127.0.0.1:8787/debug/raw?url=dichvuright.max'
+	mux.HandleFunc("/debug/raw", func(w http.ResponseWriter, r *http.Request) {
+		handleDebugRaw(w, r, cookie, pool, proxyFallbackDirect, timeout)
 	})
 	// Debug: xem header profile thứ n (0..7)
 	mux.HandleFunc("/debug/header", func(w http.ResponseWriter, r *http.Request) {
@@ -468,6 +492,106 @@ func runServer(listen, cookie string, pool *ProxyPool, proxyFallbackDirect bool,
 }
 
 // Handler chính của API
+// handleDebugRaw: gọi Facebook qua 3 host (www -> mbasic -> m), trả về thông tin debug.
+// Không parse UID, chỉ quan tâm status, finalURL, độ dài html, có phải login không,
+// và preview HTML để soi.
+func handleDebugRaw(w http.ResponseWriter, r *http.Request, cookie string, pool *ProxyPool, proxyFallbackDirect bool, timeout int) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	target := strings.TrimSpace(r.URL.Query().Get("url"))
+	if target == "" {
+		w.WriteHeader(400)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing url param"})
+		return
+	}
+	// Có thể truyền nguyên username (dichvuright.max) hoặc URL đầy đủ
+	if !strings.Contains(target, "facebook.com") && !strings.HasPrefix(target, "http") {
+		target = "https://www.facebook.com/" + target
+	} else if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		target = "https://" + target
+	}
+
+	hosts := []string{"www.facebook.com", "mbasic.facebook.com", "m.facebook.com"}
+	type oneResult struct {
+		Host      string `json:"host"`
+		URL       string `json:"url"`
+		FinalURL  string `json:"final_url"`
+		Status    int    `json:"status"`
+		HTMLLen   int    `json:"html_len"`
+		IsLogin   bool   `json:"is_login_or_checkpoint"`
+		Preview   string `json:"html_preview"`
+		Err       string `json:"error,omitempty"`
+		HeaderIdx int    `json:"header_profile_idx"`
+	}
+	results := make([]oneResult, 0, len(hosts))
+
+	// Lấy proxy (nếu có)
+	var proxyURL *url.URL
+	if pool != nil {
+		proxyURL = pool.Next()
+	}
+	for _, host := range hosts {
+		urlStr := swapFacebookHost(target, host)
+		uidIdx := atomic.AddInt64(&headerIdx, 1) - 1
+		profileIdx := int(uidIdx) % len(headerProfiles)
+
+		client := makeClient(proxyURL, timeout)
+		req, errReq := http.NewRequest("GET", urlStr, nil)
+		if errReq != nil {
+			results = append(results, oneResult{Host: host, URL: urlStr, Err: errReq.Error(), HeaderIdx: profileIdx})
+			continue
+		}
+		setHeaders(req, cookie, "")
+
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			results = append(results, oneResult{Host: host, URL: urlStr, Err: errDo.Error(), HeaderIdx: profileIdx})
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+		resp.Body.Close()
+
+		finalURL := urlStr
+		if resp.Request != nil && resp.Request.URL != nil {
+			finalURL = resp.Request.URL.String()
+		}
+		html := string(body)
+		results = append(results, oneResult{
+			Host:      host,
+			URL:       urlStr,
+			FinalURL:  finalURL,
+			Status:    resp.StatusCode,
+			HTMLLen:   len(html),
+			IsLogin:   isFacebookLoginOrCheckpoint(html, finalURL),
+			Preview:   previewHTML(html, 800),
+			HeaderIdx: profileIdx,
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"target":         target,
+		"proxy_outbound": proxyURL != nil,
+		"cookie_present": cookie != "",
+		"results":        results,
+		"time_check":     time.Now().Format(time.RFC3339),
+	})
+}
+
+// previewHTML: cắt bớt tag/script, lấy N ký tự đầu để dễ nhìn
+func previewHTML(html string, max int) string {
+	// Bỏ <script>...</script> và <style>...</style> cho gọn
+	reScript := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	reStyle := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	s := reScript.ReplaceAllString(html, "")
+	s = reStyle.ReplaceAllString(s, "")
+	// Nén whitespace
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
+}
+
 func handleFacebookAPI(w http.ResponseWriter, r *http.Request, cookie string, pool *ProxyPool, proxyFallbackDirect bool, timeout, retries int) {
 	startTime := time.Now()
 
@@ -854,6 +978,9 @@ func formatFetchError(err error, useProxy bool) string {
 	if strings.Contains(err.Error(), "http_429") || strings.Contains(err.Error(), "http_403") {
 		return "Facebook chặn tạm thời (429/403). Thử lại sau hoặc bật proxy USE_PROXY=true."
 	}
+	if strings.Contains(err.Error(), "login_or_checkpoint") {
+		return "Facebook yêu cầu đăng nhập / checkpoint khi truy cập profile này. Thử đổi FB_COOKIE (cookie tài khoản Facebook đang đăng nhập), bật USE_PROXY=true, hoặc vài phút sau thử lại."
+	}
 	if strings.Contains(err.Error(), "uid_not_found") {
 		return "Không tìm thấy UID trong HTML Facebook (profile ẩn, checkpoint hoặc link không đúng)."
 	}
@@ -863,40 +990,154 @@ func formatFetchError(err error, useProxy bool) string {
 	return "Không lấy được UID: " + err.Error()
 }
 
-func doFetch(proxy *url.URL, cookie, username string, timeout int) (string, string, string, string, error) {
-	client := makeClient(proxy, timeout)
-	target := "https://www.facebook.com/" + username
-
-	req, err := http.NewRequest("GET", target, nil)
-	if err != nil {
-		return "", "", "", "", err
+// isFacebookLoginOrCheckpoint: phát hiện Facebook trả về trang đăng nhập / checkpoint
+// thay vì trang profile. Khi đó phải thử lại bằng host mobile (mbasic/m) trước khi báo lỗi.
+func isFacebookLoginOrCheckpoint(html, finalURL string) bool {
+	lowURL := strings.ToLower(finalURL)
+	if strings.Contains(lowURL, "facebook.com/login") ||
+		strings.Contains(lowURL, "/login/?next=") ||
+		strings.Contains(lowURL, "facebook.com/checkpoint") ||
+		strings.Contains(lowURL, "/checkpoint/block") ||
+		strings.Contains(lowURL, "/checkpoint/") {
+		return true
 	}
-	setHeaders(req, cookie)
+	if len(html) == 0 {
+		return false
+	}
+	low := strings.ToLower(html)
+	// Form đăng nhập: name=email + name=pass là dấu hiệu rõ nhất
+	if (strings.Contains(low, `name="email"`) || strings.Contains(low, `id="email"`)) &&
+		(strings.Contains(low, `name="pass"`) || strings.Contains(low, `id="pass"`)) {
+		return true
+	}
+	if strings.Contains(low, `name="login_form"`) ||
+		strings.Contains(low, `id="login_form"`) ||
+		strings.Contains(low, `action="/login/`) ||
+		strings.Contains(low, `action="/login.php`) ||
+		strings.Contains(low, `"checkpoint_required":true`) ||
+		strings.Contains(low, `"checkpoint_url"`) ||
+		strings.Contains(low, `log in to facebook`) ||
+		strings.Contains(low, `log into facebook`) ||
+		strings.Contains(low, `please log in`) ||
+		(strings.Contains(low, `class="_9o-_`) && strings.Contains(low, `forgot password`)) {
+		return true
+	}
+	return false
+}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", "", "", err
+// swapFacebookHost: đổi host www.facebook.com -> newHost (mbasic/m), giữ nguyên path + query.
+// Không phân biệt http/https, www/không www, m/không m.
+func swapFacebookHost(rawURL, newHost string) string {
+	s := rawURL
+	// Nếu chưa có scheme thì ép https
+	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		s = "https://" + s
+	}
+	for _, old := range []string{
+		"https://www.facebook.com",
+		"https://m.facebook.com",
+		"https://mbasic.facebook.com",
+		"https://facebook.com",
+		"http://www.facebook.com",
+		"http://m.facebook.com",
+		"http://mbasic.facebook.com",
+		"http://facebook.com",
+	} {
+		if strings.HasPrefix(s, old) {
+			return "https://" + newHost + strings.TrimPrefix(s, old)
+		}
+	}
+	return s
+}
+
+func doFetch(proxy *url.URL, cookie, username string, timeout int) (string, string, string, string, error) {
+	target := "https://www.facebook.com/" + username
+	uid, finalURL, name, title, html, err := doFetchOnce(proxy, cookie, target, "", timeout)
+	if uid != "" {
+		return uid, finalURL, name, title, nil
+	}
+	// Nếu Facebook đá sang trang login/checkpoint -> thử lần lượt mbasic rồi m
+	if isFacebookLoginOrCheckpoint(html, finalURL) {
+		for _, host := range []string{"mbasic.facebook.com", "m.facebook.com"} {
+			alt := swapFacebookHost(target, host)
+			uid2, finalURL2, name2, title2, _, err2 := doFetchOnce(proxy, cookie, alt, "https://"+host+"/", timeout)
+			if uid2 != "" {
+				return uid2, finalURL2, name2, title2, nil
+			}
+			// Nếu mobile trả lỗi không phải login thì trả lỗi gốc luôn
+			if err2 != nil && !isRecoverableHTTPError(err2) {
+				return "", finalURL, name, title, err2
+			}
+		}
+		// Cả www + mbasic + m đều dính login -> trả lỗi riêng
+		return "", finalURL, name, title, fmt.Errorf("login_or_checkpoint")
+	}
+	if err != nil && !isRecoverableHTTPError(err) {
+		return "", finalURL, name, title, err
+	}
+
+	// Fallback search (chậm) — tối đa 2 lần; không dùng khi proxy
+	if name != "" && proxy == nil {
+		candidates := nameCandidates(name)
+		if len(candidates) > 2 {
+			candidates = candidates[:2]
+		}
+		searchTO := timeout
+		if searchTO > 10 {
+			searchTO = 10
+		}
+		for _, n := range candidates {
+			uid2, errURL, errName, err2 := searchUIDByName(nil, cookie, n, searchTO)
+			if err2 == nil && uid2 != "" {
+				return uid2, errURL, n, errName, nil
+			}
+		}
+	}
+	return "", finalURL, name, title, fmt.Errorf("uid_not_found")
+}
+
+// isRecoverableHTTPError: lỗi 4xx/5xx / rate-limit có thể thử host khác
+func isRecoverableHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "http_4") || strings.Contains(s, "http_5") || strings.Contains(s, "rate_limit")
+}
+
+// doFetchOnce: 1 lần HTTP GET + parse UID. Trả về html để caller quyết định retry.
+func doFetchOnce(proxy *url.URL, cookie, target, referer string, timeout int) (uid, finalURL, name, title, html string, err error) {
+	client := makeClient(proxy, timeout)
+	req, errReq := http.NewRequest("GET", target, nil)
+	if errReq != nil {
+		return "", "", "", "", "", errReq
+	}
+	setHeaders(req, cookie, referer)
+
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		return "", "", "", "", "", errDo
 	}
 	defer resp.Body.Close()
 
-	finalURL := target
+	finalURL = target
 	if resp.Request != nil && resp.Request.URL != nil {
 		finalURL = resp.Request.URL.String()
 	}
 
 	if resp.StatusCode == 429 || resp.StatusCode == 403 {
-		return "", finalURL, "", "", fmt.Errorf("http_%d_rate_limit", resp.StatusCode)
+		return "", finalURL, "", "", "", fmt.Errorf("http_%d_rate_limit", resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
-		return "", finalURL, "", "", fmt.Errorf("http_%d", resp.StatusCode)
+		return "", finalURL, "", "", "", fmt.Errorf("http_%d", resp.StatusCode)
 	}
 
-	html, earlyUID, earlyName, earlyTitle, err := readFacebookHTMLUntilUID(resp.Body)
-	if err != nil {
-		return "", finalURL, "", "", err
+	html, earlyUID, earlyName, earlyTitle, errRead := readFacebookHTMLUntilUID(resp.Body)
+	if errRead != nil {
+		return "", finalURL, "", "", "", errRead
 	}
 	if earlyUID != "" {
-		name, title := earlyName, earlyTitle
+		name, title = earlyName, earlyTitle
 		if name == "" {
 			name = title
 		}
@@ -909,29 +1150,11 @@ func doFetch(proxy *url.URL, cookie, username string, timeout int) (string, stri
 		if name == "" {
 			name = title
 		}
-		return earlyUID, finalURL, name, title, nil
+		return earlyUID, finalURL, name, title, html, nil
 	}
-
-	title := extractTitle(html)
-	name := extractName(html)
-	// Fallback search (chậm) — tối đa 2 lần; không dùng khi proxy
-	if name != "" && proxy == nil {
-		candidates := nameCandidates(name)
-		if len(candidates) > 2 {
-			candidates = candidates[:2]
-		}
-		searchTO := timeout
-		if searchTO > 10 {
-			searchTO = 10
-		}
-		for _, n := range candidates {
-			uid, errURL, errName, err := searchUIDByName(nil, cookie, n, searchTO)
-			if err == nil && uid != "" {
-				return uid, errURL, n, errName, nil
-			}
-		}
-	}
-	return "", finalURL, name, title, fmt.Errorf("uid_not_found")
+	title = extractTitle(html)
+	name = extractName(html)
+	return "", finalURL, name, title, html, nil
 }
 
 func resolveResponseUsername(inputUser, finalURL, uid string) string {
@@ -1128,60 +1351,35 @@ func looksLikeShareSlug(s string) bool {
 }
 
 func doFetchURL(proxy *url.URL, cookie, targetURL string, timeout int) (string, string, string, string, error) {
-	client := makeClient(proxy, timeout)
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
-		return "", "", "", "", err
+	uid, finalURL, name, title, html, err := doFetchOnce(proxy, cookie, targetURL, "", timeout)
+	if uid != "" {
+		return uid, finalURL, name, title, nil
 	}
-	setHeaders(req, cookie)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	defer resp.Body.Close()
-
-	finalURL := targetURL
-	if resp.Request != nil && resp.Request.URL != nil {
-		finalURL = resp.Request.URL.String()
-	}
-
-	if resp.StatusCode == 429 || resp.StatusCode == 403 {
-		return "", finalURL, "", "", fmt.Errorf("http_%d_rate_limit", resp.StatusCode)
-	}
-	if resp.StatusCode >= 400 {
-		return "", finalURL, "", "", fmt.Errorf("http_%d", resp.StatusCode)
-	}
-
-	html, earlyUID, earlyName, earlyTitle, err := readFacebookHTMLUntilUID(resp.Body)
-	if err != nil {
-		return "", finalURL, "", "", err
-	}
-	if earlyUID == "" {
-		earlyUID = uidFromFinalURL(finalURL)
-	}
-	if earlyUID == "" {
-		earlyUID = extractSharePageUID(html)
-	}
-	if earlyUID != "" {
-		name, title := earlyName, earlyTitle
-		if name == "" {
-			name = title
+	if isFacebookLoginOrCheckpoint(html, finalURL) {
+		for _, host := range []string{"mbasic.facebook.com", "m.facebook.com"} {
+			alt := swapFacebookHost(targetURL, host)
+			uid2, finalURL2, name2, title2, _, err2 := doFetchOnce(proxy, cookie, alt, "https://"+host+"/", timeout)
+			if uid2 != "" {
+				return uid2, finalURL2, name2, title2, nil
+			}
+			if err2 != nil && !isRecoverableHTTPError(err2) {
+				return "", finalURL, name, title, err2
+			}
 		}
-		if title == "" {
-			title = extractTitle(html)
-		}
-		if name == "" {
-			name = extractName(html)
-		}
-		if name == "" {
-			name = title
-		}
-		return earlyUID, finalURL, name, title, nil
+		return "", finalURL, name, title, fmt.Errorf("login_or_checkpoint")
+	}
+	if err != nil && !isRecoverableHTTPError(err) {
+		return "", finalURL, name, title, err
 	}
 
-	title := extractTitle(html)
-	name := extractName(html)
+	// Thử lấy UID từ finalURL / share page
+	if uid2 := uidFromFinalURL(finalURL); uid2 != "" {
+		return uid2, finalURL, name, title, nil
+	}
+	if uid2 := extractSharePageUID(html); uid2 != "" {
+		return uid2, finalURL, name, title, nil
+	}
+
 	if name != "" && proxy == nil {
 		candidates := nameCandidates(name)
 		if len(candidates) > 2 {
@@ -1192,9 +1390,9 @@ func doFetchURL(proxy *url.URL, cookie, targetURL string, timeout int) (string, 
 			searchTO = 10
 		}
 		for _, n := range candidates {
-			uid, errURL, errName, err := searchUIDByName(nil, cookie, n, searchTO)
-			if err == nil && uid != "" {
-				return uid, errURL, n, errName, nil
+			uid2, errURL, errName, err2 := searchUIDByName(nil, cookie, n, searchTO)
+			if err2 == nil && uid2 != "" {
+				return uid2, errURL, n, errName, nil
 			}
 		}
 	}
@@ -1597,12 +1795,11 @@ func searchUIDByName(proxy *url.URL, cookie, name string, timeout int) (string, 
 		return "", "", "", err
 	}
 	// Search thì đổi accept & sec-fetch sang JSON-ish, nhưng HTML vẫn ok
-	setHeaders(req, cookie)
+	setHeaders(req, cookie, "https://www.facebook.com/")
 	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("sec-fetch-dest", "document")
 	req.Header.Set("sec-fetch-mode", "navigate")
 	req.Header.Set("sec-fetch-site", "same-origin")
-	req.Header.Set("referer", "https://www.facebook.com/")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1694,10 +1891,9 @@ func tryGraphQLTypeahead(proxy *url.URL, cookie, name string, timeout int) strin
 	if err != nil {
 		return ""
 	}
-	setHeaders(req, cookie)
+	setHeaders(req, cookie, "https://www.facebook.com/")
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("x-requested-with", "XMLHttpRequest")
-	req.Header.Set("referer", "https://www.facebook.com/")
 
 	resp, err := client.Do(req)
 	if err != nil {
