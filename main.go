@@ -1059,6 +1059,22 @@ func doFetch(proxy *url.URL, cookie, username string, timeout int) (string, stri
 	if uid != "" {
 		return uid, finalURL, name, title, nil
 	}
+	// Nếu Facebook redirect về chrome/home của cookie user (title="Facebook",
+	// HTML không chứa username đang query) -> giữ error wrong_page
+	if err != nil && strings.Contains(err.Error(), "wrong_page") {
+		// Vẫn thử mobile hosts 1 lần trước khi báo lỗi
+		for _, host := range []string{"mbasic.facebook.com", "m.facebook.com"} {
+			alt := swapFacebookHost(target, host)
+			uid2, finalURL2, name2, title2, _, err2 := doFetchOnce(proxy, cookie, alt, "https://"+host+"/", timeout)
+			if uid2 != "" {
+				return uid2, finalURL2, name2, title2, nil
+			}
+			if err2 != nil && !strings.Contains(err2.Error(), "wrong_page") && !isRecoverableHTTPError(err2) {
+				return "", finalURL, name, title, err2
+			}
+		}
+		return "", finalURL, name, title, fmt.Errorf("wrong_page")
+	}
 	// Nếu Facebook đá sang trang login/checkpoint -> thử lần lượt mbasic rồi m
 	if isFacebookLoginOrCheckpoint(html, finalURL) {
 		for _, host := range []string{"mbasic.facebook.com", "m.facebook.com"} {
@@ -1137,7 +1153,7 @@ func doFetchOnce(proxy *url.URL, cookie, target, referer string, timeout int) (u
 	}
 
 	// Phát hiện redirect về home/feed/me — tránh nhầm UID tài khoản cookie
-	if isWrongPage(target, finalURL) {
+	if isWrongPage(target, finalURL, "") {
 		// Đọc hết body để trả về cho debug, nhưng báo error để caller xử lý
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 		return "", finalURL, "", "", string(bodyBytes), fmt.Errorf("wrong_page")
@@ -1146,6 +1162,11 @@ func doFetchOnce(proxy *url.URL, cookie, target, referer string, timeout int) (u
 	html, earlyUID, earlyName, earlyTitle, errRead := readFacebookHTMLUntilUID(resp.Body, finalURL)
 	if errRead != nil {
 		return "", finalURL, "", "", "", errRead
+	}
+	// Check lại sau khi có HTML: cookie user có thể được serve chrome/home page
+	// dù URL không redirect (title="Facebook", không chứa username đang query)
+	if isWrongPage(target, finalURL, html) {
+		return "", finalURL, "", "", html, fmt.Errorf("wrong_page")
 	}
 	if earlyUID != "" {
 		name, title = earlyName, earlyTitle
@@ -1478,43 +1499,113 @@ func extractExpectedUIDFromURL(u string) string {
 	return ""
 }
 
-// isWrongPage: phát hiện Facebook redirect mình sang trang home/feed/me/notifications
-// thay vì profile đang query. Khi đó, mọi "userID" trong HTML là của tài khoản cookie,
-// KHÔNG phải của profile đang xem — phải trả về error thay vì nhầm UID.
-func isWrongPage(target, finalURL string) bool {
-	if finalURL == "" {
-		return false
+// isWrongPage: phát hiện Facebook trả về sai trang (chrome/home của cookie user
+// thay vì profile đang query). Khi đó, mọi "userID" trong HTML là của tài khoản
+// cookie, KHÔNG phải của profile đang xem — phải trả về error thay vì nhầm UID.
+//
+// Có 2 dạng:
+//
+//	(A) HTTP redirect sang /home.php, /feed/, /me/, ...  -> bắt được bằng finalURL
+//	(B) Vẫn ở URL /username nhưng HTML là chrome/home (title="Facebook",
+//	    og:title="Facebook", HTML không chứa username/id của profile) ->
+//	    bắt được bằng pageMentionsTarget
+func isWrongPage(target, finalURL, html string) bool {
+	if finalURL != "" {
+		low := strings.ToLower(finalURL)
+		badSubstrings := []string{
+			"/home.php", "/?sk=h_n", "/?sk=h_chr", "/?ref=", "/me/", "/feed/",
+			"/watch/", "/notifications", "/marketplace", "/friends",
+			"/settings", "/login.php", "/login/?next=", "/checkpoint/",
+		}
+		for _, b := range badSubstrings {
+			if strings.Contains(low, b) {
+				return true
+			}
+		}
+		tp, err1 := url.Parse(target)
+		fp, err2 := url.Parse(finalURL)
+		if err1 == nil && err2 == nil {
+			tpPath := strings.Trim(tp.Path, "/")
+			fpPath := strings.Trim(fp.Path, "/")
+			if tpPath != "" && tpPath != "profile.php" && !looksLikeShareSlug(tpPath) {
+				if fpPath == "" {
+					return true
+				}
+				if fpPath != "profile.php" && !strings.HasPrefix(fpPath, "people/") &&
+					!strings.HasPrefix(fpPath, "share/") && fpPath != tpPath {
+					return true
+				}
+			}
+		}
 	}
-	low := strings.ToLower(finalURL)
-	badSubstrings := []string{
-		"/home.php", "/?sk=h_n", "/?sk=h_chr", "/?ref=", "/me/", "/feed/",
-		"/watch/", "/notifications", "/marketplace", "/friends",
-		"/settings", "/login.php", "/login/?next=", "/checkpoint/",
+	// (B) HTML không chứa username/id của profile đang query -> chrome/home của cookie user
+	if html != "" && !pageMentionsTarget(target, html) {
+		return true
 	}
-	for _, b := range badSubstrings {
-		if strings.Contains(low, b) {
+	return false
+}
+
+// pageMentionsTarget: kiểm tra HTML có chứa username hoặc UID của profile đang query không.
+// - Với ?id=X: tìm chuỗi X trong HTML
+// - Với /people/Name/UID: tìm UID
+// - Với /username: tìm username (case-insensitive)
+func pageMentionsTarget(target, html string) bool {
+	targetURL := normalizeFBURL(target)
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed == nil {
+		return true
+	}
+	htmlLow := strings.ToLower(html)
+	// ?id=X
+	if id := parsed.Query().Get("id"); id != "" && len(id) >= 6 {
+		if strings.Contains(html, id) {
 			return true
 		}
 	}
-	tp, err1 := url.Parse(target)
-	fp, err2 := url.Parse(finalURL)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	tpPath := strings.Trim(tp.Path, "/")
-	fpPath := strings.Trim(fp.Path, "/")
-	// target có /username nhưng finalURL chỉ về "/" -> đây là home page
-	if tpPath != "" && tpPath != "profile.php" && !looksLikeShareSlug(tpPath) {
-		if fpPath == "" {
-			return true
+	// /people/Name/UID
+	path := strings.Trim(parsed.Path, "/")
+	if strings.HasPrefix(path, "people/") {
+		parts := strings.Split(path, "/")
+		if len(parts) >= 3 && len(parts[2]) >= 6 {
+			if strings.Contains(html, parts[2]) {
+				return true
+			}
 		}
-		// /profile.php?id=X bị redirect sang /username-khác (không phải share)
-		if fpPath != "profile.php" && !strings.HasPrefix(fpPath, "people/") &&
-			!strings.HasPrefix(fpPath, "share/") && fpPath != tpPath {
+	}
+	// /username
+	if path != "" && path != "profile.php" && !strings.HasPrefix(path, "people/") {
+		if strings.Contains(htmlLow, strings.ToLower(path)) {
 			return true
 		}
 	}
 	return false
+}
+
+// extractOGTitle: lấy og:title (tên hiển thị của profile, vd "Nguyễn Duy Khánh")
+func extractOGTitle(html string) string {
+	if m := reOGTitle.FindStringSubmatch(html); len(m) >= 2 {
+		return htmlUnescape(m[1])
+	}
+	return ""
+}
+
+// extractOGURL: lấy og:url (canonical URL của profile đang xem)
+func extractOGURLAny(html string) string {
+	if m := reOGURLAny.FindStringSubmatch(html); len(m) >= 2 {
+		return m[1]
+	}
+	return ""
+}
+
+// htmlUnescape: giải mã các entity HTML phổ biến (&amp; &quot; &#xNN;)
+func htmlUnescape(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&quot;", `"`)
+	s = strings.ReplaceAll(s, "&#039;", "'")
+	s = strings.ReplaceAll(s, "&apos;", "'")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	return s
 }
 
 var (
@@ -1705,6 +1796,8 @@ func extractFromLegacyUserID(html string) string {
 	}
 	return ""
 }
+
+var reOGURLAny = regexp.MustCompile(`property="og:url"\s+content="([^"]+)"`)
 
 // og:url dạng https://www.facebook.com/people/Name/1000... hoặc /profile/1000...
 var reOGURL = regexp.MustCompile(`property="og:url"\s+content="https?://(?:www\.|m\.)?facebook\.com/(?:people/[^/]+/|profile\.php\?id=)?(\d+)"`)
