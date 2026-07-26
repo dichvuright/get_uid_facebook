@@ -978,6 +978,9 @@ func formatFetchError(err error, useProxy bool) string {
 	if strings.Contains(err.Error(), "http_429") || strings.Contains(err.Error(), "http_403") {
 		return "Facebook chặn tạm thời (429/403). Thử lại sau hoặc bật proxy USE_PROXY=true."
 	}
+	if strings.Contains(err.Error(), "wrong_page") {
+		return "Facebook redirect sang trang khác (home/feed/me) thay vì profile. Có thể FB_COOKIE đang đăng nhập đè lên — thử xóa FB_COOKIE trong .env hoặc dùng cookie của chính profile đang xem."
+	}
 	if strings.Contains(err.Error(), "login_or_checkpoint") {
 		return "Facebook yêu cầu đăng nhập / checkpoint khi truy cập profile này. Thử đổi FB_COOKIE (cookie tài khoản Facebook đang đăng nhập), bật USE_PROXY=true, hoặc vài phút sau thử lại."
 	}
@@ -1096,13 +1099,14 @@ func doFetch(proxy *url.URL, cookie, username string, timeout int) (string, stri
 	return "", finalURL, name, title, fmt.Errorf("uid_not_found")
 }
 
-// isRecoverableHTTPError: lỗi 4xx/5xx / rate-limit có thể thử host khác
+// isRecoverableHTTPError: lỗi 4xx/5xx / rate-limit / wrong_page có thể thử host khác
 func isRecoverableHTTPError(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "http_4") || strings.Contains(s, "http_5") || strings.Contains(s, "rate_limit")
+	return strings.Contains(s, "http_4") || strings.Contains(s, "http_5") ||
+		strings.Contains(s, "rate_limit") || strings.Contains(s, "wrong_page")
 }
 
 // doFetchOnce: 1 lần HTTP GET + parse UID. Trả về html để caller quyết định retry.
@@ -1132,7 +1136,14 @@ func doFetchOnce(proxy *url.URL, cookie, target, referer string, timeout int) (u
 		return "", finalURL, "", "", "", fmt.Errorf("http_%d", resp.StatusCode)
 	}
 
-	html, earlyUID, earlyName, earlyTitle, errRead := readFacebookHTMLUntilUID(resp.Body)
+	// Phát hiện redirect về home/feed/me — tránh nhầm UID tài khoản cookie
+	if isWrongPage(target, finalURL) {
+		// Đọc hết body để trả về cho debug, nhưng báo error để caller xử lý
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+		return "", finalURL, "", "", string(bodyBytes), fmt.Errorf("wrong_page")
+	}
+
+	html, earlyUID, earlyName, earlyTitle, errRead := readFacebookHTMLUntilUID(resp.Body, finalURL)
 	if errRead != nil {
 		return "", finalURL, "", "", "", errRead
 	}
@@ -1441,6 +1452,71 @@ func isAllDigits(s string) bool {
 	return true
 }
 
+// extractExpectedUIDFromURL: lấy UID mà URL hứa hẹn (?id=X hoặc /people/Name/X).
+// Dùng để cross-validate UID tìm được trong HTML — tránh match nhầm UID của tài khoản
+// đang đăng nhập (cookie) khi Facebook trả về trang có cả data của cookie user lẫn profile user.
+func extractExpectedUIDFromURL(u string) string {
+	if u == "" {
+		return ""
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	// ?id=X hoặc ?id=X&... hoặc các query khác có id=
+	if id := parsed.Query().Get("id"); id != "" && len(id) >= 8 && isAllDigits(id) {
+		return id
+	}
+	// /people/Name/UID
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "people" {
+		last := parts[len(parts)-1]
+		if isAllDigits(last) && len(last) >= 8 {
+			return last
+		}
+	}
+	return ""
+}
+
+// isWrongPage: phát hiện Facebook redirect mình sang trang home/feed/me/notifications
+// thay vì profile đang query. Khi đó, mọi "userID" trong HTML là của tài khoản cookie,
+// KHÔNG phải của profile đang xem — phải trả về error thay vì nhầm UID.
+func isWrongPage(target, finalURL string) bool {
+	if finalURL == "" {
+		return false
+	}
+	low := strings.ToLower(finalURL)
+	badSubstrings := []string{
+		"/home.php", "/?sk=h_n", "/?sk=h_chr", "/?ref=", "/me/", "/feed/",
+		"/watch/", "/notifications", "/marketplace", "/friends",
+		"/settings", "/login.php", "/login/?next=", "/checkpoint/",
+	}
+	for _, b := range badSubstrings {
+		if strings.Contains(low, b) {
+			return true
+		}
+	}
+	tp, err1 := url.Parse(target)
+	fp, err2 := url.Parse(finalURL)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	tpPath := strings.Trim(tp.Path, "/")
+	fpPath := strings.Trim(fp.Path, "/")
+	// target có /username nhưng finalURL chỉ về "/" -> đây là home page
+	if tpPath != "" && tpPath != "profile.php" && !looksLikeShareSlug(tpPath) {
+		if fpPath == "" {
+			return true
+		}
+		// /profile.php?id=X bị redirect sang /username-khác (không phải share)
+		if fpPath != "profile.php" && !strings.HasPrefix(fpPath, "people/") &&
+			!strings.HasPrefix(fpPath, "share/") && fpPath != tpPath {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	reShareOwnerID   = regexp.MustCompile(`"owning_profile"\s*:\s*\{[^}]*"id"\s*:\s*"(\d+)"`)
 	reShareActorID   = regexp.MustCompile(`"actorID"\s*:\s*"(\d+)"`)
@@ -1469,24 +1545,61 @@ func extractSharePageUID(html string) string {
 	return ""
 }
 
-// tryParseUID — thứ tự giống PHP (legacy userID trước), chỉ chạy trên buffer hiện có
-func tryParseUID(html string) (uid, name, title string) {
-	if uid = extractFromLegacyUserID(html); uid != "" {
-		return uid, fastExtractName(html), fastExtractTitle(html)
+// tryParseUID — thứ tự ưu tiên MỚI (đã fix bug nhầm UID cookie):
+//
+//  1. og:url — luôn là canonical URL của profile đang xem (kể cả khi đã đăng nhập).
+//  2. fb://profile/X trong og:url hoặc al:ios:url — cũng là canonical.
+//  3. shouldUseFXIMProfilePicEditor:false,"userID":"..." — chỉ chấp nhận khi trùng
+//     expectedUID (URL ?id= hoặc /people/Name/UID); nếu không khớp thì bỏ qua vì
+//     có thể là của tài khoản đang đăng nhập (cookie user), không phải profile.
+//  4. Generic "userID":"..." — cũng chỉ chấp nhận khi trùng expectedUID.
+//  5. extractFromJSON — regex rộng, chỉ dùng cuối cùng khi đã hết cách.
+//
+// finalURL dùng để cross-validate với expectedUID.
+func tryParseUID(html, finalURL string) (uid, name, title string) {
+	expected := extractExpectedUIDFromURL(finalURL)
+
+	// Thu thập tất cả candidate theo priority
+	type cand struct {
+		u   string
+		src string
 	}
-	if uid = extractFromAppURL(html); uid != "" {
-		return uid, fastExtractName(html), fastExtractTitle(html)
+	var candidates []cand
+	if u := extractFromOGURL(html); u != "" {
+		candidates = append(candidates, cand{u, "og_url"})
 	}
-	if uid = extractFromOGURL(html); uid != "" {
-		return uid, fastExtractName(html), fastExtractTitle(html)
+	if u := extractFromAppURL(html); u != "" {
+		candidates = append(candidates, cand{u, "app_url"})
 	}
-	if uid = extractUserID(html); uid != "" {
-		return uid, fastExtractName(html), fastExtractTitle(html)
+	if u := extractFromLegacyUserID(html); u != "" {
+		candidates = append(candidates, cand{u, "legacy_user_id"})
 	}
-	if uid = extractFromJSON(html); uid != "" {
-		return uid, fastExtractName(html), fastExtractTitle(html)
+	if u := extractUserID(html); u != "" {
+		candidates = append(candidates, cand{u, "user_id"})
 	}
-	return "", "", ""
+	if u := extractFromJSON(html); u != "" {
+		candidates = append(candidates, cand{u, "json"})
+	}
+
+	name = fastExtractName(html)
+	title = fastExtractTitle(html)
+
+	// Nếu URL có expectedUID -> chỉ chấp nhận candidate trùng expectedUID
+	if expected != "" {
+		for _, c := range candidates {
+			if c.u == expected {
+				return c.u, name, title
+			}
+		}
+		// Không match: trả "" để caller xử lý (fallback search, mobile retry, ...)
+		return "", name, title
+	}
+
+	// Không có expectedUID: dùng candidate đầu tiên theo priority (đã sort)
+	for _, c := range candidates {
+		return c.u, name, title
+	}
+	return "", name, title
 }
 
 func fastExtractTitle(html string) string {
@@ -1507,20 +1620,25 @@ func fastExtractName(html string) string {
 	return extractName(html)
 }
 
-// readFacebookHTMLUntilUID: chunk 32KB, dừng ngay khi có UID — không đọc tới 2MB
-func readFacebookHTMLUntilUID(r io.Reader) (html, uid, name, title string, err error) {
+// readFacebookHTMLUntilUID: chunk 32KB, dừng ngay khi có UID hợp lệ (qua cross-validation).
+// finalURL dùng để cross-validate, tránh match nhầm UID của cookie user.
+func readFacebookHTMLUntilUID(r io.Reader, finalURL string) (html, uid, name, title string, err error) {
 	const chunk = 32 * 1024
 	const maxTotal = 384 * 1024
+	expected := extractExpectedUIDFromURL(finalURL)
 	var buf []byte
 	tmp := make([]byte, chunk)
 	for len(buf) < maxTotal {
 		n, readErr := r.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			uid, name, title = tryParseUID(string(buf))
+			uid, name, title = tryParseUID(string(buf), finalURL)
 			if uid != "" {
 				return string(buf), uid, name, title, nil
 			}
+			// Nếu đã biết expectedUID và đã thấy candidate khác expectedUID
+			// thì không cần đọc tiếp chunk làm gì (vẫn phải đọc tới maxTotal
+			// để các extractor mới như og:url có cơ hội xuất hiện).
 		}
 		if readErr == io.EOF {
 			break
@@ -1533,7 +1651,8 @@ func readFacebookHTMLUntilUID(r io.Reader) (html, uid, name, title string, err e
 		}
 	}
 	s := string(buf)
-	uid, name, title = tryParseUID(s)
+	uid, name, title = tryParseUID(s, finalURL)
+	_ = expected
 	return s, uid, name, title, nil
 }
 
