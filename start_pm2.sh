@@ -22,11 +22,45 @@ echo " ENV_FILE  : $ENV_FILE"
 echo
 
 # 1. Kiểm tra binary
+if [ ! -f "$BIN" ]; then
+    echo "✗ Không thấy file $BIN"
+    echo "  → Tải binary mới: wget -O tool_facebook https://github.com/dichvuright/get_uid_facebook/raw/main/tool_facebook_linux_amd64"
+    exit 1
+fi
 if [ ! -x "$BIN" ]; then
-    echo "✗ Không thấy binary $BIN (hoặc chưa chmod +x)"
+    echo "✗ Binary $BIN chưa có quyền execute"
     echo "  → chmod +x tool_facebook && bash $0"
     exit 1
 fi
+
+# 1b. Kiểm tra binary có phải ELF Linux không (tránh 'cannot execute binary file')
+FILE_TYPE=$(file -b "$BIN" 2>/dev/null || echo "")
+case "$FILE_TYPE" in
+    *"ELF"*"x86-64"*)         echo "✓ Binary: ELF x86_64 (amd64)" ;;
+    *"ELF"*"aarch64"*)        echo "✓ Binary: ELF aarch64 (arm64)" ;;
+    *"ELF"*"ARM"*)            echo "✓ Binary: ELF ARM" ;;
+    *"ELF"*)                  echo "✓ Binary: ELF ($(uname -m))" ;;
+    *"PE32"*"executable"*|*"MS Windows"*)
+        echo "✗ Binary này là WINDOWS (.exe), không chạy được trên Linux!"
+        echo "  → wget -O $BIN https://github.com/dichvuright/get_uid_facebook/raw/main/tool_facebook_linux_amd64"
+        exit 1
+        ;;
+    *"HTML"*)
+        echo "✗ File này là HTML (có thể tải nhầm trang 404 của GitHub)"
+        echo "  → wget -O $BIN https://github.com/dichvuright/get_uid_facebook/raw/main/tool_facebook_linux_amd64"
+        exit 1
+        ;;
+    *"gzip"*)
+        echo "✗ File này là gzip (có thể bị nén / tải nhầm)"
+        echo "  → wget -O $BIN https://github.com/dichvuright/get_uid_facebook/raw/main/tool_facebook_linux_amd64"
+        exit 1
+        ;;
+    *)
+        echo "✗ Binary không nhận diện được (file báo: '$FILE_TYPE')"
+        echo "  → Kiểm tra lại: file $BIN"
+        exit 1
+        ;;
+esac
 
 # 2. Khởi tạo pm2 (nếu chưa có) + tạo thư mục log
 mkdir -p "$LOG_DIR"
