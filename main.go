@@ -13,11 +13,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -26,7 +28,7 @@ import (
 const (
 	defaultCookie    = "datr=EKAqahfNwJS_qvLnSAwQvmdH; sb=EKAqau1ZOj3GUm_XR16xEc0r; ps_l=1; ps_n=1; wd=612x945"
 	defaultProxyUser = ""
-	defaultListen    = ":8787"
+	defaultListen    = "0.0.0.0:8787"
 	defaultProxyHost = ""
 	defaultProxyTLS  = false // true = dùng HTTPS proxy (CONNECT qua TLS)
 	defaultTimeout   = 25
@@ -485,10 +487,24 @@ func runServer(listen, cookie string, pool *ProxyPool, proxyFallbackDirect bool,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil {
+
+	// Graceful shutdown: pm2 reload / docker stop / Ctrl+C sẽ gọi SIGTERM.
+	// Nếu không handle thì port bị OS giữ ở TIME_WAIT vài chục giây,
+	// process mới không bind được -> "Address already in use".
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-stop
+		fmt.Println("\n>> Nhận tín hiệu shutdown, draining requests trong 5s...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Println("Lỗi server:", err)
 		os.Exit(1)
 	}
+	fmt.Println(">> Server đã dừng sạch.")
 }
 
 // Handler chính của API
