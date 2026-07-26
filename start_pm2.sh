@@ -28,7 +28,7 @@ if [ ! -f "$BIN" ]; then
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
-    echo "✗ Binary $BIN chưa có quyền execute"
+    echo "✗ Không thấy binary $BIN (hoặc chưa chmod +x)"
     echo "  → chmod +x tool_facebook && bash $0"
     exit 1
 fi
